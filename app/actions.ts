@@ -76,17 +76,6 @@ export async function fetchFeedsAction(): Promise<Article[]> {
 }
 
 export async function pickViralArticleAction(articles: Article[]): Promise<Article | null> {
-  // HARDCODED BYPASS: To save API costs locally, return the specific article link.
-  return {
-    id: "mock_viral_id_123",
-    title: "Why OpenAI killed Sora",
-    link: "https://www.theverge.com/ai-artificial-intelligence/902368/openai-sora-dead-ai-video-generation-competition",
-    description: "OpenAI's video-generation AI app, Sora, is dead as of Tuesday. OpenAI said it needs to focus its existing compute on its AI agent goals and enterprise tools.",
-    pubDate: new Date().toISOString(),
-    source: "The Verge"
-  };
-
-  /* 
   // ORIGINAL LLM LOGIC
   if (!articles || articles.length === 0) return null;
 
@@ -103,12 +92,12 @@ CRITICAL: You must specifically prioritize articles in the AI (Artificial Intell
 Return strictly the exact ID string of the chosen article. No explanation, no markdown, no quotes, just the pure ID string.
 
 Articles:
-\${articlesToAnalyze}`;
+${articlesToAnalyze}`;
 
     const response = await fetch("https://openrouter.ai/api/v1/chat/completions", {
       method: "POST",
       headers: {
-        "Authorization": \`Bearer \${apiKey}\`,
+        "Authorization": `Bearer ${apiKey}`,
         "Content-Type": "application/json"
       },
       body: JSON.stringify({
@@ -134,7 +123,6 @@ Articles:
     console.error("Viral detect error:", err);
     throw err;
   }
-  */
 }
 
 export async function fetchFullArticleAction(url: string) {
