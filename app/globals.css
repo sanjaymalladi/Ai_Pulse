@@ -1,26 +1,526 @@
 @import "tailwindcss";
 
 :root {
-  --background: #ffffff;
-  --foreground: #171717;
+    /* Hard-Contrast Palette */
+    --bg-main: #0a0a0a;
+    --text-core: #e5e7eb;
+    --text-dim: #9ca3af;
+    --brand-neon: #ccff00; /* Electric Lime */
+    --brand-alert: #ff3333;
+    
+    /* Layout */
+    --border-hard: 2px solid var(--text-core);
+    --border-neon: 2px solid var(--brand-neon);
+    
+    /* Typography */
+    --font-sys: 'Space Mono', 'Courier New', monospace;
+    --font-heading: 'Syne', sans-serif;
 }
 
-@theme inline {
-  --color-background: var(--background);
-  --color-foreground: var(--foreground);
-  --font-sans: var(--font-geist-sans);
-  --font-mono: var(--font-geist-mono);
-}
-
-@media (prefers-color-scheme: dark) {
-  :root {
-    --background: #0a0a0a;
-    --foreground: #ededed;
-  }
+* {
+    margin: 0;
+    padding: 0;
+    box-sizing: border-box;
+    cursor: crosshair; /* Brutalist touch */
 }
 
 body {
-  background: var(--background);
-  color: var(--foreground);
-  font-family: Arial, Helvetica, sans-serif;
+    background-color: var(--bg-main);
+    color: var(--text-core);
+    font-family: var(--font-sys);
+    line-height: 1.5;
+    overflow-x: hidden;
+    min-height: 100vh;
+}
+
+::selection {
+    background-color: var(--brand-neon);
+    color: var(--bg-main);
+}
+
+/* Background Grid Overlay */
+.bg-grid {
+    position: fixed;
+    top: 0;
+    left: 0;
+    width: 100vw;
+    height: 100vh;
+    z-index: -1;
+    background-size: 40px 40px;
+    background-image: 
+        linear-gradient(to right, rgba(255,255,255,0.03) 1px, transparent 1px),
+        linear-gradient(to bottom, rgba(255,255,255,0.03) 1px, transparent 1px);
+    pointer-events: none;
+}
+
+::-webkit-scrollbar {
+    width: 6px;
+}
+
+::-webkit-scrollbar-track {
+    background: var(--bg-main);
+    border-left: 1px solid var(--text-core);
+}
+
+::-webkit-scrollbar-thumb {
+    background: var(--brand-neon);
+}
+
+/* Layout */
+.terminal-container {
+    max-width: 1400px;
+    margin: 0 auto;
+    padding: 32px 24px;
+}
+
+/* Header */
+.masthead {
+    display: flex;
+    justify-content: space-between;
+    align-items: flex-end;
+    margin-bottom: 48px;
+    border-bottom: var(--border-hard);
+    padding-bottom: 16px;
+}
+
+.logo-area {
+    display: flex;
+    align-items: center;
+    gap: 16px;
+}
+
+.status-indicator {
+    width: 16px;
+    height: 16px;
+    background-color: var(--brand-neon);
+    box-shadow: 0 0 10px var(--brand-neon);
+    animation: blink 1.5s infinite steps(2);
+}
+
+@keyframes blink {
+    0% { opacity: 1; }
+    50% { opacity: 0; }
+}
+
+.logo-area h1 {
+    font-family: var(--font-heading);
+    font-size: 2.5rem;
+    font-weight: 800;
+    text-transform: uppercase;
+    letter-spacing: -1px;
+    line-height: 1;
+}
+
+.version-tag {
+    font-size: 0.75rem;
+    background: var(--text-core);
+    color: var(--bg-main);
+    padding: 2px 6px;
+    font-weight: 700;
+}
+
+.controls {
+    display: flex;
+    align-items: center;
+    gap: 24px;
+}
+
+.data-readout {
+    display: flex;
+    flex-direction: column;
+    text-align: right;
+}
+
+.data-readout .label {
+    font-size: 0.7rem;
+    color: var(--text-dim);
+}
+
+.data-readout #current-time {
+    font-size: 1.1rem;
+    font-weight: 700;
+    color: var(--brand-neon);
+}
+
+/* Buttons */
+.sys-btn {
+    background: transparent;
+    border: 1px solid var(--text-core);
+    color: var(--text-core);
+    font-family: var(--font-sys);
+    padding: 8px 16px;
+    font-size: 0.9rem;
+    font-weight: 700;
+    text-transform: uppercase;
+    transition: all 0.1s ease;
+    cursor: pointer;
+}
+
+.sys-btn:hover {
+    background: var(--brand-neon);
+    color: var(--bg-main);
+    border-color: var(--brand-neon);
+}
+
+.sys-btn:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+}
+
+.error-btn {
+    border-color: var(--brand-alert);
+    color: var(--brand-alert);
+}
+
+.error-btn:hover {
+    background: var(--brand-alert);
+}
+
+.custom-tabs {
+    display:flex;
+    gap: 12px;
+}
+.tab-btn {
+    opacity: 0.5;
+    border-bottom-color: transparent;
+}
+.tab-btn.active {
+    opacity: 1;
+    color: var(--brand-neon);
+    border-color: var(--brand-neon);
+}
+
+/* Banner Stats */
+.ticker-banner {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 24px;
+    margin-bottom: 48px;
+}
+
+.stat-block {
+    border: var(--border-hard);
+    padding: 24px;
+    display: flex;
+    flex-direction: column;
+    background: #111;
+}
+
+.stat-block.outline {
+    border-color: var(--brand-neon);
+    background: transparent;
+}
+
+.stat-block .label {
+    font-size: 0.8rem;
+    color: var(--text-dim);
+    margin-bottom: 8px;
+}
+
+.stat-block .value {
+    font-family: var(--font-heading);
+    font-size: 2rem;
+    font-weight: 800;
+    color: var(--text-core);
+    line-height: 1;
+}
+
+.stat-block.outline .value {
+    color: var(--brand-neon);
+}
+
+/* Content Area */
+.feed-header {
+    margin-bottom: 24px;
+}
+
+.feed-header h2 {
+    font-size: 1.25rem;
+    font-weight: 700;
+    background: var(--text-core);
+    color: var(--bg-main);
+    display: inline-block;
+    padding: 4px 12px;
+}
+
+.state-container {
+    border: 1px dashed var(--text-dim);
+    padding: 64px 24px;
+    text-align: center;
+}
+
+.loading-bar {
+    width: 100%;
+    max-width: 300px;
+    height: 10px;
+    border: 1px solid var(--text-core);
+    margin: 0 auto 24px auto;
+    position: relative;
+    overflow: hidden;
+}
+
+.loading-bar::after {
+    content: '';
+    position: absolute;
+    top: 0;
+    left: -50%;
+    width: 50%;
+    height: 100%;
+    background: var(--brand-neon);
+    animation: loading 1.2s infinite linear;
+}
+
+@keyframes loading {
+    0% { left: -50%; }
+    100% { left: 100%; }
+}
+
+.error-container.error {
+    border-color: var(--brand-alert);
+}
+
+.error-container.error h3 {
+    color: var(--brand-alert);
+    font-size: 1.5rem;
+    margin-bottom: 12px;
+}
+
+.error-container.error p {
+    margin-bottom: 24px;
+}
+
+.hidden {
+    display: none !important;
+}
+
+/* Grid layout */
+.news-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(350px, 1fr));
+    gap: 32px;
+    padding-bottom: 64px;
+}
+
+/* Minimalist / Brutal Card */
+.article-card {
+    border: var(--border-hard);
+    padding: 24px;
+    display: flex;
+    flex-direction: column;
+    background: #000;
+    position: relative;
+    transition: transform 0.1s;
+}
+
+.article-card:hover {
+    transform: translate(-4px, -4px);
+    box-shadow: 8px 8px 0px var(--brand-neon);
+    border-color: var(--brand-neon);
+}
+
+.article-meta {
+    display: flex;
+    justify-content: space-between;
+    border-bottom: 1px solid #333;
+    padding-bottom: 12px;
+    margin-bottom: 16px;
+    font-size: 0.75rem;
+    color: var(--text-dim);
+}
+
+.src-tag {
+    color: var(--brand-neon);
+    font-weight: 700;
+}
+
+.article-card h3 {
+    font-family: var(--font-heading);
+    font-size: 1.5rem;
+    font-weight: 800;
+    line-height: 1.1;
+    margin-bottom: 16px;
+}
+
+.article-preview {
+    font-size: 0.9rem;
+    color: #ccc;
+    display: -webkit-box;
+    -webkit-box-orient: vertical;
+    -webkit-line-clamp: 4;
+    line-clamp: 4;
+    overflow: hidden;
+    margin-bottom: 32px;
+    flex-grow: 1;
+}
+
+.card-action {
+    margin-top: auto;
+    font-weight: 700;
+    font-size: 0.8rem;
+    text-transform: uppercase;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+
+.article-card:hover .card-action {
+    color: var(--brand-neon);
+}
+
+/* Modal Overlay */
+.modal {
+    position: fixed;
+    top: 0;
+    left: 0;
+    width: 100vw;
+    height: 100vh;
+    z-index: 1000;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+}
+
+.modal-backdrop {
+    position: absolute;
+    top: 0;
+    left: 0;
+    width: 100%;
+    height: 100%;
+    background: rgba(0, 0, 0, 0.85);
+    backdrop-filter: blur(4px);
+    -webkit-backdrop-filter: blur(4px);
+}
+
+.modal-box {
+    position: relative;
+    width: 90%;
+    max-width: 900px;
+    max-height: 90vh;
+    background: var(--bg-main);
+    border: var(--border-hard);
+    box-shadow: 16px 16px 0px var(--brand-neon);
+    display: flex;
+    flex-direction: column;
+    z-index: 1001;
+}
+
+.modal-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    border-bottom: var(--border-hard);
+    padding: 16px 24px;
+    background: #111;
+}
+
+.modal-title {
+    font-weight: 700;
+    font-size: 0.8rem;
+    color: var(--brand-neon);
+}
+
+.sys-btn.icon-only {
+    padding: 4px 8px;
+}
+
+.modal-body {
+    padding: 32px 48px;
+    overflow-y: auto;
+}
+
+.modal-body h1 {
+    font-family: var(--font-heading);
+    font-size: 2.5rem;
+    line-height: 1.1;
+    margin-bottom: 24px;
+}
+
+.modal-details {
+    display: flex;
+    gap: 24px;
+    font-size: 0.8rem;
+    color: var(--text-dim);
+    margin-bottom: 32px;
+    padding-bottom: 16px;
+    border-bottom: 1px dashed #333;
+}
+
+.modal-content-html {
+    font-family: var(--font-sys);
+    font-size: 1.1rem;
+    line-height: 1.6;
+    color: #e5e7eb;
+}
+
+.modal-content-html p {
+    margin-bottom: 24px;
+}
+
+.modal-content-html a {
+    color: var(--brand-neon);
+    text-decoration: none;
+    border-bottom: 1px solid var(--brand-neon);
+}
+
+.modal-content-html a:hover {
+    background: var(--brand-neon);
+    color: var(--bg-main);
+}
+
+.modal-content-html h2 {
+    font-family: var(--font-heading);
+    font-size: 1.8rem;
+    margin: 40px 0 16px;
+    padding-bottom: 8px;
+    border-bottom: 1px solid #333;
+}
+
+.modal-content-html img {
+    max-width: 100%;
+    border: 1px solid #333;
+    margin: 24px 0;
+    filter: grayscale(100%) contrast(1.2);
+    transition: filter 0.3s;
+}
+
+.modal-content-html img:hover {
+    filter: grayscale(0%);
+}
+
+.out-link-btn {
+    display: inline-block;
+    margin-top: 40px;
+    padding: 16px 24px;
+    background: var(--text-core);
+    color: var(--bg-main);
+    text-decoration: none;
+    font-weight: 700;
+    border: 2px solid var(--text-core);
+    transition: all 0.2s;
+}
+
+.out-link-btn:hover {
+    background: var(--brand-neon);
+    border-color: var(--brand-neon);
+    color: var(--bg-main);
+}
+
+@media (max-width: 768px) {
+    .ticker-banner {
+        grid-template-columns: 1fr;
+    }
+    
+    .masthead {
+        flex-direction: column;
+        align-items: flex-start;
+        gap: 24px;
+    }
+    
+    .news-grid {
+        grid-template-columns: 1fr;
+    }
+    
+    .modal-body {
+        padding: 24px;
+    }
 }
