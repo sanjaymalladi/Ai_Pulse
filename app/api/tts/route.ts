@@ -3,8 +3,8 @@ import { NextRequest } from "next/server";
 const TTS_UPSTREAM = "https://sanjay.tailc61860.ts.net/tts";
 const TTS_TIMEOUT_MS = 12 * 60 * 1000; // 12 minutes hard cap
 
-// Allow up to 600s on Vercel / edge runtimes
-export const maxDuration = 600;
+// Allow up to 300s on Vercel (Hobby plan limit)
+export const maxDuration = 300;
 
 export async function POST(req: NextRequest) {
   const body = await req.json();
