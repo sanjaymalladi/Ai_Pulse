@@ -1,16 +1,35 @@
 'use client';
 
-import { useState, useRef, useEffect } from 'react';
+import { useEffect, useRef, useState } from 'react';
+import { saveStudioTtsAudio } from '../lib/studioAudioCache';
+import { getTtsDirectUrl, isVercelBrowser } from '../lib/ttsClient';
 
-// Proxied through Next.js API route to avoid CORS
-const TTS_ENDPOINT = '/api/tts';
+const TTS_START_ENDPOINT = '/api/tts/start';
 
 interface TTSTabProps {
   script: string | null;
+  initialAudioUrl?: string | null;
+  initialServerAudioUrl?: string | null;
+  onAudioGenerated?: (url: string | null) => void;
+  onServerAudioGenerated?: (url: string | null) => void;
 }
 
-export default function TTSTab({ script }: TTSTabProps) {
-  const [status, setStatus] = useState<'idle' | 'generating' | 'ready' | 'error'>('idle');
+type TtsStatus = 'idle' | 'generating' | 'ready' | 'error';
+
+function makeRequestId() {
+  return typeof crypto !== 'undefined' && 'randomUUID' in crypto
+    ? crypto.randomUUID()
+    : `tts_${Date.now()}`;
+}
+
+export default function TTSTab({
+  script,
+  initialAudioUrl = null,
+  initialServerAudioUrl = null,
+  onAudioGenerated,
+  onServerAudioGenerated,
+}: TTSTabProps) {
+  const [status, setStatus] = useState<TtsStatus>('idle');
   const [errorMsg, setErrorMsg] = useState('');
   const [audioUrl, setAudioUrl] = useState<string | null>(null);
   const [isPlaying, setIsPlaying] = useState(false);
@@ -18,99 +37,174 @@ export default function TTSTab({ script }: TTSTabProps) {
   const [currentTime, setCurrentTime] = useState(0);
   const [volume, setVolume] = useState(1);
   const [isMuted, setIsMuted] = useState(false);
+  const [requestId, setRequestId] = useState<string | null>(null);
+  const [jobId, setJobId] = useState<string | null>(null);
+  const [lastEvent, setLastEvent] = useState('idle');
+  const [statusDetail, setStatusDetail] = useState('');
+  const [serverAudioUrl, setServerAudioUrl] = useState<string | null>(initialServerAudioUrl);
 
   const audioRef = useRef<HTMLAudioElement | null>(null);
   const progressRef = useRef<HTMLDivElement>(null);
   const prevUrlRef = useRef<string | null>(null);
+  const activeRequestRef = useRef<string | null>(null);
+  const activeJobRef = useRef<string | null>(null);
+  const generateLockRef = useRef(false);
 
-  // Cleanup old object URL
   useEffect(() => {
-    return () => {
-      if (prevUrlRef.current) URL.revokeObjectURL(prevUrlRef.current);
-    };
-  }, []);
+    if (!initialAudioUrl) return;
+    setAudioUrl(initialAudioUrl);
+    setStatus('ready');
+    setCurrentTime(0);
+    setIsPlaying(false);
+  }, [initialAudioUrl]);
+
+  useEffect(() => {
+    if (!initialServerAudioUrl) return;
+    setServerAudioUrl(initialServerAudioUrl);
+  }, [initialServerAudioUrl]);
+
+  async function finalizeTtsBlob(blob: Blob, currentRequestId: string) {
+    await saveStudioTtsAudio(blob);
+    if (prevUrlRef.current?.startsWith('blob:')) {
+      URL.revokeObjectURL(prevUrlRef.current);
+    }
+    if (activeRequestRef.current !== currentRequestId) return;
+    const url = URL.createObjectURL(blob);
+    prevUrlRef.current = url;
+    setAudioUrl(url);
+    onAudioGenerated?.(url);
+    setStatus('ready');
+    setCurrentTime(0);
+    setIsPlaying(false);
+    setLastEvent('audio_ready');
+    setStatusDetail(`Audio finalized (${Math.round(blob.size / 1024)} KB).`);
+  }
+
+  async function pollJob(currentRequestId: string, currentJobId: string) {
+    let attempts = 0;
+    let consecutiveFailures = 0;
+
+    while (activeRequestRef.current === currentRequestId && activeJobRef.current === currentJobId) {
+      attempts += 1;
+      try {
+        const statusRes = await fetch(`/api/tts/status/${encodeURIComponent(currentJobId)}`, {
+          cache: 'no-store',
+        });
+        const statusPayload = await statusRes.json().catch(() => ({}));
+        if (!statusRes.ok) {
+          throw new Error(statusPayload.error || `TTS_STATUS_FAILED // HTTP ${statusRes.status}`);
+        }
+
+        consecutiveFailures = 0;
+        const jobStatus = typeof statusPayload.status === 'string' ? statusPayload.status : 'unknown';
+        const eta = typeof statusPayload.eta === 'number' ? `${Math.round(statusPayload.eta)}s` : 'n/a';
+        const rank =
+          typeof statusPayload.rank === 'number' && typeof statusPayload.queue_size === 'number'
+            ? `${statusPayload.rank}/${statusPayload.queue_size}`
+            : 'n/a';
+
+        setLastEvent(`status:${jobStatus}`);
+        setStatusDetail(`JOB ${jobStatus.toUpperCase()} // ETA ${eta} // QUEUE ${rank} // POLL ${attempts}`);
+
+        if (jobStatus === 'failed') {
+          throw new Error(statusPayload.error || 'TTS_JOB_FAILED');
+        }
+
+        if (jobStatus === 'done') {
+          setLastEvent('result_fetching');
+          setStatusDetail('Job finished. Downloading audio result...');
+          const resultRes = await fetch(`/api/tts/result/${encodeURIComponent(currentJobId)}`, {
+            cache: 'no-store',
+          });
+          if (!resultRes.ok) {
+            throw new Error(`TTS_RESULT_FAILED // HTTP ${resultRes.status}`);
+          }
+          const cachedUrl = resultRes.headers.get('X-Studio-Cache-Url');
+          if (cachedUrl) {
+            setServerAudioUrl(cachedUrl);
+            onServerAudioGenerated?.(cachedUrl);
+          }
+          const blob = await resultRes.blob();
+          if (blob.size === 0) throw new Error('TTS_EMPTY_RESULT');
+          await finalizeTtsBlob(blob, currentRequestId);
+          return;
+        }
+      } catch (error) {
+        consecutiveFailures += 1;
+        setLastEvent('poll_error');
+        setStatusDetail(`Polling issue ${consecutiveFailures}/5. Retrying...`);
+        if (consecutiveFailures >= 5) {
+          throw error;
+        }
+      }
+
+      await new Promise((resolve) => setTimeout(resolve, 3000));
+    }
+  }
 
   async function generateSpeech() {
-    if (!script) return;
+    if (!script || generateLockRef.current) return;
+
+    const currentRequestId = makeRequestId();
+    generateLockRef.current = true;
+    activeRequestRef.current = currentRequestId;
+    activeJobRef.current = null;
+    setRequestId(currentRequestId);
+    setJobId(null);
+    setLastEvent('request_created');
+    setStatusDetail('Submitting synthesis request.');
     setStatus('generating');
     setErrorMsg('');
 
     try {
-      const res = await fetch(TTS_ENDPOINT, {
+      const directUrl = getTtsDirectUrl();
+      if (directUrl) {
+        setStatusDetail('Direct TTS URL is configured, but polling mode now expects the Next.js proxy.');
+      }
+
+      const startRes = await fetch(TTS_START_ENDPOINT, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ text: script }),
+        body: JSON.stringify({ text: script, requestId: currentRequestId }),
       });
-
-      if (!res.ok) throw new Error(`TTS_SERVER_REJECTED // HTTP ${res.status}`);
-      if (!res.body) throw new Error('No response body');
-
-      // Read SSE stream — route sends keep-alive pings every 5s while the
-      // upstream model runs, then sends the audio payload as base64.
-      const reader = res.body.getReader();
-      const decoder = new TextDecoder();
-      let buf = '';
-      let done = false;
-
-      while (!done) {
-        const chunk = await reader.read();
-        if (chunk.done) break;
-
-        buf += decoder.decode(chunk.value, { stream: true });
-        const parts = buf.split('\n\n');
-        buf = parts.pop() ?? '';
-
-        for (const part of parts) {
-          const lines = part.trim().split('\n');
-          let event = 'message';
-          let data = '';
-          for (const line of lines) {
-            if (line.startsWith('event:')) event = line.slice(6).trim();
-            if (line.startsWith('data:')) data = line.slice(5).trim();
-          }
-
-          if (event === 'ping') continue;
-
-          if (event === 'error') {
-            const payload = JSON.parse(data);
-            throw new Error(payload.message || 'UNKNOWN_TTS_ERROR');
-          }
-
-          if (event === 'audio') {
-            const { contentType, base64 } = JSON.parse(data);
-            const binary = atob(base64);
-            const bytes = new Uint8Array(binary.length);
-            for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
-            const blob = new Blob([bytes], { type: contentType });
-
-            if (prevUrlRef.current) URL.revokeObjectURL(prevUrlRef.current);
-            const url = URL.createObjectURL(blob);
-            prevUrlRef.current = url;
-            setAudioUrl(url);
-            setStatus('ready');
-            setCurrentTime(0);
-            setIsPlaying(false);
-            done = true;
-            break;
-          }
-        }
+      const startPayload = await startRes.json().catch(() => ({}));
+      if (!startRes.ok) {
+        throw new Error(startPayload.error || `TTS_START_FAILED // HTTP ${startRes.status}`);
       }
-    } catch (err: any) {
-      setErrorMsg(err.message || 'UNKNOWN_FAILURE');
-      setStatus('error');
+
+      const newJobId = String(startPayload.jobId || '');
+      if (!newJobId) throw new Error('TTS_START_MISSING_JOB_ID');
+
+      activeJobRef.current = newJobId;
+      setJobId(newJobId);
+      setLastEvent('job_started');
+      setStatusDetail(`Job queued: ${newJobId}`);
+
+      await pollJob(currentRequestId, newJobId);
+    } catch (err: unknown) {
+      const message = err instanceof Error ? err.message : 'UNKNOWN_FAILURE';
+      if (activeRequestRef.current === currentRequestId) {
+        setLastEvent('error');
+        setStatusDetail('Generation failed before audio was finalized.');
+        setErrorMsg(message);
+        setStatus('error');
+      }
+    } finally {
+      if (activeRequestRef.current === currentRequestId) {
+        generateLockRef.current = false;
+      }
     }
   }
 
-
   function downloadWav() {
-    if (!audioUrl) return;
+    const downloadSource = serverAudioUrl || audioUrl;
+    if (!downloadSource) return;
     const a = document.createElement('a');
-    a.href = audioUrl;
+    a.href = downloadSource;
     a.download = `tts_output_${Date.now()}.wav`;
     a.click();
   }
 
-  // Audio element events
   useEffect(() => {
     const audio = audioRef.current;
     if (!audio) return;
@@ -140,7 +234,7 @@ export default function TTSTab({ script }: TTSTabProps) {
     const audio = audioRef.current;
     if (!audio) return;
     if (isPlaying) audio.pause();
-    else audio.play();
+    else void audio.play();
   }
 
   function seek(e: React.MouseEvent<HTMLDivElement>) {
@@ -175,13 +269,11 @@ export default function TTSTab({ script }: TTSTabProps) {
 
   const progress = duration > 0 ? (currentTime / duration) * 100 : 0;
 
-  /* ─── States ─── */
   if (!script) {
     return (
       <div className="state-container">
         <p style={{ color: 'var(--text-dim)' }}>
-          NO SCRIPT LOADED — GENERATE A SCRIPT IN{' '}
-          <span style={{ color: 'var(--brand-neon)' }}>SCRIPT_GEN</span> FIRST.
+          NO SCRIPT LOADED. GENERATE A SCRIPT IN <span style={{ color: 'var(--brand-neon)' }}>SCRIPT_GEN</span> FIRST.
         </p>
       </div>
     );
@@ -189,13 +281,10 @@ export default function TTSTab({ script }: TTSTabProps) {
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: '32px', paddingBottom: '64px' }}>
-      {/* Script Preview */}
       <div className="modal-box" style={{ width: '100%', maxWidth: '100%', boxShadow: 'none', position: 'relative' }}>
         <div className="modal-header">
           <span className="modal-title">LOADED_SCRIPT_PAYLOAD</span>
-          <span style={{ fontSize: '0.7rem', color: 'var(--text-dim)' }}>
-            {script.length.toLocaleString()} CHARS
-          </span>
+          <span style={{ fontSize: '0.7rem', color: 'var(--text-dim)' }}>{script.length.toLocaleString()} CHARS</span>
         </div>
         <div
           className="modal-body"
@@ -215,7 +304,12 @@ export default function TTSTab({ script }: TTSTabProps) {
         </div>
       </div>
 
-      {/* Generate Button */}
+      {isVercelBrowser() && !getTtsDirectUrl() && (
+        <p style={{ fontSize: '0.72rem', color: 'var(--text-dim)', lineHeight: 1.55, maxWidth: '760px' }}>
+          POLLING MODE ACTIVE. The studio now starts a TTS job and polls for status instead of holding one long request open.
+        </p>
+      )}
+
       {status !== 'ready' && (
         <div style={{ display: 'flex', alignItems: 'center', gap: '24px' }}>
           <button
@@ -245,27 +339,38 @@ export default function TTSTab({ script }: TTSTabProps) {
             <div style={{ display: 'flex', flexDirection: 'column', gap: '6px', flex: 1 }}>
               <div className="loading-bar" style={{ maxWidth: '100%' }} />
               <span style={{ fontSize: '0.7rem', color: 'var(--text-dim)' }}>
-                AWAITING AUDIO STREAM RESPONSE FROM NEURAL_VOICE_SVC...
+                JOB STARTED. POLLING TTS STATUS UNTIL AUDIO IS READY...
               </span>
             </div>
           )}
         </div>
       )}
 
-      {/* Error */}
+      {status === 'generating' && (
+        <div className="stat-block outline" style={{ gap: '8px' }}>
+          <span className="label">TTS_DIAGNOSTICS</span>
+          <span style={{ fontSize: '0.78rem', color: 'var(--text-core)' }}>REQUEST_ID // {requestId}</span>
+          <span style={{ fontSize: '0.78rem', color: 'var(--text-core)' }}>JOB_ID // {jobId || 'pending'}</span>
+          <span style={{ fontSize: '0.78rem', color: 'var(--text-core)' }}>LAST_EVENT // {lastEvent}</span>
+          <span style={{ fontSize: '0.78rem', color: 'var(--text-dim)' }}>{statusDetail}</span>
+        </div>
+      )}
+
       {status === 'error' && (
         <div className="state-container error" style={{ borderColor: 'var(--brand-alert)' }}>
           <h3 style={{ color: 'var(--brand-alert)', fontSize: '1.25rem', marginBottom: '12px' }}>
             [ TTS_TRANSMISSION_FAILED ]
           </h3>
           <p style={{ marginBottom: '20px', color: 'var(--text-dim)', fontSize: '0.85rem' }}>{errorMsg}</p>
+          <p style={{ marginBottom: '20px', color: 'var(--text-dim)', fontSize: '0.75rem' }}>
+            REQUEST: {requestId || 'n/a'} {'//'} JOB: {jobId || 'n/a'} {'//'} LAST_EVENT: {lastEvent}
+          </p>
           <button className="sys-btn error-btn" onClick={generateSpeech}>
             [ RETRY_TRANSMISSION ]
           </button>
         </div>
       )}
 
-      {/* Audio Player */}
       {status === 'ready' && audioUrl && (
         <>
           <audio ref={audioRef} src={audioUrl} preload="auto" />
@@ -281,7 +386,6 @@ export default function TTSTab({ script }: TTSTabProps) {
               overflow: 'hidden',
             }}
           >
-            {/* Player Header */}
             <div
               style={{
                 background: 'var(--brand-neon)',
@@ -293,23 +397,14 @@ export default function TTSTab({ script }: TTSTabProps) {
               }}
             >
               <span style={{ fontWeight: 700, fontSize: '0.8rem', letterSpacing: '0.1em' }}>
-                ◈ NEURAL_VOICE_OUTPUT // READY
+                NEURAL_VOICE_OUTPUT // READY
               </span>
               <span style={{ fontSize: '0.75rem', fontWeight: 700 }}>
                 {formatTime(currentTime)} / {formatTime(duration)}
               </span>
             </div>
 
-            {/* Waveform visualizer (CSS art) */}
-            <div
-              style={{
-                padding: '24px 24px 8px',
-                display: 'flex',
-                alignItems: 'center',
-                gap: '3px',
-                height: '72px',
-              }}
-            >
+            <div style={{ padding: '24px 24px 8px', display: 'flex', alignItems: 'center', gap: '3px', height: '72px' }}>
               {Array.from({ length: 64 }).map((_, i) => {
                 const barProgress = (i / 64) * 100;
                 const isPast = barProgress <= progress;
@@ -323,8 +418,8 @@ export default function TTSTab({ script }: TTSTabProps) {
                       background: isPast
                         ? 'var(--brand-neon)'
                         : isPlaying
-                        ? `rgba(204,255,0,${0.15 + Math.random() * 0.1})`
-                        : 'rgba(255,255,255,0.08)',
+                          ? `rgba(204,255,0,${0.18 + (i % 5) * 0.01})`
+                          : 'rgba(255,255,255,0.08)',
                       transition: 'background 0.15s ease',
                       borderRadius: '1px',
                       animation: isPlaying && isPast ? `tts-wave-${i % 4} 0.4s ease infinite alternate` : 'none',
@@ -334,7 +429,6 @@ export default function TTSTab({ script }: TTSTabProps) {
               })}
             </div>
 
-            {/* Seek bar */}
             <div style={{ padding: '0 24px' }}>
               <div
                 ref={progressRef}
@@ -359,7 +453,6 @@ export default function TTSTab({ script }: TTSTabProps) {
                     transition: 'width 0.1s linear',
                   }}
                 />
-                {/* Playhead */}
                 <div
                   style={{
                     position: 'absolute',
@@ -377,17 +470,7 @@ export default function TTSTab({ script }: TTSTabProps) {
               </div>
             </div>
 
-            {/* Controls */}
-            <div
-              style={{
-                padding: '20px 24px 24px',
-                display: 'flex',
-                alignItems: 'center',
-                gap: '16px',
-                flexWrap: 'wrap',
-              }}
-            >
-              {/* Play / Pause */}
+            <div style={{ padding: '20px 24px 24px', display: 'flex', alignItems: 'center', gap: '16px', flexWrap: 'wrap' }}>
               <button
                 className="sys-btn"
                 onClick={togglePlay}
@@ -400,10 +483,9 @@ export default function TTSTab({ script }: TTSTabProps) {
                   textAlign: 'center',
                 }}
               >
-                {isPlaying ? '⏸' : '▶'}
+                {isPlaying ? 'PAUSE' : 'PLAY'}
               </button>
 
-              {/* Stop */}
               <button
                 className="sys-btn"
                 onClick={() => {
@@ -414,17 +496,17 @@ export default function TTSTab({ script }: TTSTabProps) {
                 }}
                 style={{ padding: '10px 16px', fontSize: '1rem' }}
               >
-                ⏹
+                STOP
               </button>
 
-              {/* Volume */}
               <button
                 className="sys-btn"
                 onClick={toggleMute}
                 style={{ padding: '10px 14px', fontSize: '1rem', minWidth: '44px' }}
               >
-                {isMuted || volume === 0 ? '🔇' : '🔊'}
+                {isMuted || volume === 0 ? 'MUTE' : 'VOL'}
               </button>
+
               <input
                 type="range"
                 min="0"
@@ -432,34 +514,36 @@ export default function TTSTab({ script }: TTSTabProps) {
                 step="0.02"
                 value={isMuted ? 0 : volume}
                 onChange={handleVolume}
-                style={{
-                  width: '100px',
-                  accentColor: 'var(--brand-neon)',
-                  cursor: 'crosshair',
-                }}
+                style={{ width: '100px', accentColor: 'var(--brand-neon)', cursor: 'crosshair' }}
               />
 
-              {/* Spacer */}
               <div style={{ flex: 1 }} />
 
-              {/* Regenerate */}
               <button
                 className="sys-btn"
-                onClick={() => { setStatus('idle'); setAudioUrl(null); }}
+                onClick={() => {
+                  generateLockRef.current = false;
+                  activeRequestRef.current = null;
+                  activeJobRef.current = null;
+                  setStatus('idle');
+                  setAudioUrl(null);
+                  setServerAudioUrl(null);
+                  setRequestId(null);
+                  setJobId(null);
+                  setLastEvent('idle');
+                  setStatusDetail('');
+                  onAudioGenerated?.(null);
+                  onServerAudioGenerated?.(null);
+                }}
                 style={{ fontSize: '0.8rem' }}
               >
                 [ RE-SYNTHESIZE ]
               </button>
 
-              {/* Download */}
               <button
                 className="sys-btn"
                 onClick={downloadWav}
-                style={{
-                  borderColor: 'var(--brand-neon)',
-                  color: 'var(--brand-neon)',
-                  fontSize: '0.8rem',
-                }}
+                style={{ borderColor: 'var(--brand-neon)', color: 'var(--brand-neon)', fontSize: '0.8rem' }}
               >
                 [ EXPORT_WAV ]
               </button>
@@ -477,7 +561,7 @@ export default function TTSTab({ script }: TTSTabProps) {
         }
         @keyframes tts-shimmer {
           from { transform: translateX(-100%); }
-          to   { transform: translateX(100%); }
+          to { transform: translateX(100%); }
         }
         @keyframes tts-wave-0 { to { transform: scaleY(1.3); } }
         @keyframes tts-wave-1 { to { transform: scaleY(1.5); } }

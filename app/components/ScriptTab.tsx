@@ -3,32 +3,42 @@
 import { useState, useEffect } from 'react';
 import { generateScriptAction } from '../actions';
 
-export default function ScriptTab({ sourceText, onScriptGenerated }: { sourceText: string | null; onScriptGenerated?: (script: string) => void }) {
-  const [script, setScript] = useState<string | null>(null);
+type ScriptTabProps = {
+  sourceText: string | null;
+  initialScript?: string | null;
+  onScriptGenerated?: (script: string) => void;
+};
+
+export default function ScriptTab({ sourceText, initialScript = null, onScriptGenerated }: ScriptTabProps) {
+  const [script, setScript] = useState<string | null>(initialScript);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
 
   useEffect(() => {
+    if (initialScript) setScript(initialScript);
+  }, [initialScript]);
+
+  useEffect(() => {
     async function generate() {
       if (!sourceText) return;
+      if (script) return;
       
       setLoading(true);
       setError('');
-      setScript(null);
       
       try {
         const generated = await generateScriptAction(sourceText);
         setScript(generated);
         if (generated) onScriptGenerated?.(generated);
-      } catch (err: any) {
-        setError(err.message || 'FAILED TO GENERATE SCRIPT');
+      } catch (err: unknown) {
+        setError(err instanceof Error ? err.message : 'FAILED TO GENERATE SCRIPT');
       } finally {
         setLoading(false);
       }
     }
     
     generate();
-  }, [sourceText]);
+  }, [onScriptGenerated, script, sourceText]);
 
   if (!sourceText) {
     return (

@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useEffect } from "react";
+import { useState, useEffect, useCallback } from "react";
 import { useShooAuth } from "@shoojs/react";
 import { Article, fetchFeedsAction } from "./actions";
 import NewsTab from "./components/NewsTab";
@@ -8,18 +8,158 @@ import ViralTab from "./components/ViralTab";
 import ScriptTab from "./components/ScriptTab";
 import TTSTab from "./components/TTSTab";
 
+import VideoTab from "./components/VideoTab";
+import {
+  clearStudioTtsAudio,
+  loadStudioTtsAudio,
+} from "./lib/studioAudioCache";
+import { preferArxivHtmlUrl } from "./lib/arxivLinks";
+
+const STUDIO_STATE_KEY = 'studio_state';
+
+type StudioPersistedState = {
+  cachedAt: number;
+  viralArticle: Article | null;
+  viralFullHtml: string | null;
+  scriptSourceText: string | null;
+  generatedScript: string | null;
+  videoTimings: Array<{ text: string; start: number; end: number }> | null;
+  audioServerPath: string | null;
+  /** True when TTS audio is stored in IndexedDB (blob URLs are not persisted). */
+  audioCached: boolean;
+};
+
+const STUDIO_CACHE_TTL_MS = 24 * 60 * 60 * 1000; // 1 day
+
+function readStudioState(): StudioPersistedState | null {
+  if (typeof window === 'undefined') return null;
+  try {
+    const raw = localStorage.getItem(STUDIO_STATE_KEY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw) as Partial<StudioPersistedState> & {
+      audioUrl?: string | null;
+    };
+    const cachedAt = typeof parsed.cachedAt === "number" ? parsed.cachedAt : 0;
+    if (!cachedAt || Date.now() - cachedAt > STUDIO_CACHE_TTL_MS) {
+      localStorage.removeItem(STUDIO_STATE_KEY);
+      return null;
+    }
+
+    const viralArticle =
+      parsed.viralArticle && typeof parsed.viralArticle === "object"
+        ? (parsed.viralArticle as Article)
+        : null;
+    const viralFullHtml =
+      typeof parsed.viralFullHtml === "string" ? parsed.viralFullHtml : null;
+    const videoTimings = Array.isArray(parsed.videoTimings)
+      ? (parsed.videoTimings as Array<{ text: string; start: number; end: number }>)
+      : null;
+    const audioCached =
+      typeof parsed.audioCached === 'boolean'
+        ? parsed.audioCached
+        : typeof parsed.audioUrl === 'string' && parsed.audioUrl.length > 0;
+    return {
+      cachedAt,
+      viralArticle,
+      viralFullHtml,
+      scriptSourceText:
+        typeof parsed.scriptSourceText === 'string' ? parsed.scriptSourceText : null,
+      generatedScript:
+        typeof parsed.generatedScript === 'string' ? parsed.generatedScript : null,
+      videoTimings,
+      audioServerPath:
+        typeof parsed.audioServerPath === 'string' ? parsed.audioServerPath : null,
+      audioCached,
+    };
+  } catch {
+    return null;
+  }
+}
+
 export default function Home() {
   const { identity, claims, loading: authLoading, signIn, clearIdentity } = useShooAuth();
   
-  const [activeTab, setActiveTab] = useState<'news' | 'viral' | 'script' | 'tts'>('news');
+  const [activeTab, setActiveTab] = useState<'news' | 'viral' | 'script' | 'tts' | 'video'>('news');
+  const [viralArticle, setViralArticle] = useState<Article | null>(null);
+  const [viralFullHtml, setViralFullHtml] = useState<string | null>(null);
   const [scriptSourceText, setScriptSourceText] = useState<string | null>(null);
   const [generatedScript, setGeneratedScript] = useState<string | null>(null);
+  const [videoTimings, setVideoTimings] = useState<Array<{ text: string; start: number; end: number }> | null>(null);
+  const [audioUrl, setAudioUrl] = useState<string | null>(null);
+  const [audioServerPath, setAudioServerPath] = useState<string | null>(null);
+  const [studioHydrated, setStudioHydrated] = useState(false);
   const [articles, setArticles] = useState<Article[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(false);
   const [time, setTime] = useState('--:--:--');
   
   const isDev = process.env.NODE_ENV === 'development';
+
+  useEffect(() => {
+    const saved = readStudioState();
+    if (saved) {
+      setViralArticle(saved.viralArticle);
+      setViralFullHtml(saved.viralFullHtml);
+      setScriptSourceText(saved.scriptSourceText);
+      setGeneratedScript(saved.generatedScript);
+      setVideoTimings(saved.videoTimings);
+      setAudioServerPath(saved.audioServerPath);
+    }
+    if (saved?.audioCached) {
+      void loadStudioTtsAudio().then((blob) => {
+        if (blob) setAudioUrl(URL.createObjectURL(blob));
+        setStudioHydrated(true);
+      });
+    } else {
+      setStudioHydrated(true);
+    }
+  }, []);
+
+  useEffect(() => {
+    if (!studioHydrated) return;
+    try {
+      const payload: StudioPersistedState = {
+        cachedAt: Date.now(),
+        viralArticle,
+        viralFullHtml,
+        scriptSourceText,
+        generatedScript,
+        videoTimings,
+        audioServerPath,
+        audioCached: !!audioUrl,
+      };
+      localStorage.setItem(STUDIO_STATE_KEY, JSON.stringify(payload));
+    } catch (e) {
+      console.error('studio_state persist failed', e);
+    }
+  }, [
+    studioHydrated,
+    viralArticle,
+    viralFullHtml,
+    scriptSourceText,
+    generatedScript,
+    videoTimings,
+    audioServerPath,
+    audioUrl,
+  ]);
+
+  function handleAudioGenerated(url: string | null) {
+    if (url === null) void clearStudioTtsAudio();
+    setAudioUrl(url);
+  }
+
+  function handleRefreshAll() {
+    void clearStudioTtsAudio();
+    localStorage.removeItem(STUDIO_STATE_KEY);
+    setViralArticle(null);
+    setViralFullHtml(null);
+    setScriptSourceText(null);
+    setGeneratedScript(null);
+    setVideoTimings(null);
+    setAudioUrl(null);
+    setAudioServerPath(null);
+    fetchLatestNews();
+  }
 
   useEffect(() => {
     // Clock
@@ -45,6 +185,19 @@ export default function Home() {
       setLoading(false);
     }
   }
+
+  const handleViralLoaded = useCallback(
+    (payload: {
+      article: Article;
+      fullHtml: string | null;
+      fullText: string;
+    }) => {
+      setViralArticle(payload.article);
+      setViralFullHtml(payload.fullHtml);
+      setScriptSourceText(payload.fullText);
+    },
+    []
+  );
 
   // To match the legacy brutalist design logic
   const latestArticle = articles.length > 0 ? articles[0] : null;
@@ -125,7 +278,7 @@ export default function Home() {
             <span className="label">SYS.TIME</span>
             <span id="current-time">{time}</span>
           </div>
-          <button onClick={fetchLatestNews} className="sys-btn">
+          <button onClick={handleRefreshAll} className="sys-btn">
             {loading ? '[ SYNCING... ]' : '[ REFRESH ]'}
           </button>
           <div style={{ marginLeft: '12px', borderLeft: '1px solid #333', paddingLeft: '16px', display: 'flex', alignItems: 'center', gap: '8px' }}>
@@ -189,6 +342,14 @@ export default function Home() {
           >
             &gt; TTS_VOICE
           </button>
+
+          <button 
+            onClick={() => setActiveTab('video')}
+            className={`sys-btn tab-btn ${activeTab === 'video' ? 'active' : ''}`}
+            style={{ fontSize: '1.25rem', borderBottomWidth: activeTab === 'video' ? '4px' : '1px' }}
+          >
+            &gt; RENDER_MATRIX
+          </button>
         </div>
 
         {error && (
@@ -210,27 +371,47 @@ export default function Home() {
           <NewsTab 
             articles={articles} 
             onArticleClick={(a) => {
-              // Can pop up a classic modal here or open link directly
-              window.open(a.link, '_blank');
+              window.open(preferArxivHtmlUrl(a.link), "_blank");
             }} 
           />
         )}
 
         {!loading && !error && activeTab === 'viral' && (
           <ViralTab 
-            articles={articles} 
-            onTextLoaded={(text) => {
-              setScriptSourceText(text);
-            }} 
+            articles={articles}
+            initialArticle={viralArticle}
+            initialFullHtml={viralFullHtml}
+            initialFullText={scriptSourceText}
+            onViralLoaded={handleViralLoaded}
           />
         )}
 
         {!loading && !error && activeTab === 'script' && (
-          <ScriptTab sourceText={scriptSourceText} onScriptGenerated={setGeneratedScript} />
+          <ScriptTab
+            sourceText={scriptSourceText}
+            initialScript={generatedScript}
+            onScriptGenerated={setGeneratedScript}
+          />
         )}
 
         {activeTab === 'tts' && (
-          <TTSTab script={generatedScript} />
+          <TTSTab
+            script={generatedScript}
+            initialAudioUrl={audioUrl}
+            initialServerAudioUrl={audioServerPath}
+            onAudioGenerated={handleAudioGenerated}
+            onServerAudioGenerated={setAudioServerPath}
+          />
+        )}
+
+        {activeTab === 'video' && (
+          <VideoTab
+            script={generatedScript}
+            audioUrl={audioUrl}
+            audioServerPath={audioServerPath}
+            initialTimings={videoTimings}
+            onTimingsExtracted={setVideoTimings}
+          />
         )}
       </main>
     </div>
