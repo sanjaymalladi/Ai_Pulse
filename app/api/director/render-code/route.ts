@@ -9,7 +9,7 @@ const tempDir = path.join(process.cwd(), ".tmp", "renders");
 const renderScript = path.join(process.cwd(), "scripts", "render-user-code.cjs");
 
 export const runtime = "nodejs";
-export const maxDuration = 900;
+export const maxDuration = 300;
 
 function toPublicFilePath(publicUrl: string) {
   const cleaned = publicUrl.replace(/^\/+/, "");

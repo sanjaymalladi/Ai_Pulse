@@ -9,7 +9,7 @@ const outputDir = path.join(process.cwd(), "public", "cache", "renders");
 const tempDir = path.join(process.cwd(), ".tmp", "renders");
 const renderScript = path.join(process.cwd(), "scripts", "render-storyboard.cjs");
 
-export const maxDuration = 900;
+export const maxDuration = 300;
 export const runtime = "nodejs";
 
 function runRenderProcess(inputPath: string, outputLocation: string) {

@@ -7,7 +7,7 @@ import { NextRequest, NextResponse } from "next/server";
 const outputDir = path.join(process.cwd(), "public", "cache", "renders");
 
 export const runtime = "nodejs";
-export const maxDuration = 900;
+export const maxDuration = 300;
 
 function toPublicFilePath(publicUrl: string) {
   const cleaned = publicUrl.replace(/^\/+/, "");
