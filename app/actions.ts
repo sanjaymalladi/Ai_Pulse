@@ -665,6 +665,97 @@ export async function fetchFullArticleAction(url: string) {
   }
 }
 
+/**
+ * Extracts a YouTube video ID from any common YouTube URL format.
+ * Handles: youtu.be/<id>, youtube.com/watch?v=<id>, youtube.com/shorts/<id>, etc.
+ */
+function extractYouTubeVideoId(url: string): string | null {
+  try {
+    const u = new URL(url.trim());
+    // youtu.be/<id>
+    if (u.hostname === 'youtu.be') {
+      const id = u.pathname.slice(1).split('/')[0];
+      return id && id.length === 11 ? id : null;
+    }
+    // youtube.com/watch?v=<id>
+    const v = u.searchParams.get('v');
+    if (v && v.length === 11) return v;
+    // youtube.com/shorts/<id> or /embed/<id>
+    const pathParts = u.pathname.split('/').filter(Boolean);
+    const idx = pathParts.findIndex(p => p === 'shorts' || p === 'embed' || p === 'v');
+    if (idx !== -1 && pathParts[idx + 1]?.length === 11) return pathParts[idx + 1];
+  } catch {
+    // bare video ID passed directly
+    if (/^[a-zA-Z0-9_-]{11}$/.test(url.trim())) return url.trim();
+  }
+  return null;
+}
+
+export async function fetchYouTubeTranscriptAction(
+  youtubeUrl: string
+): Promise<{ ok: true; transcript: string; title: string; videoId: string } | { ok: false; error: string }> {
+  const apiKey = process.env.YOUTUBE_TRANSCRIPT_API_KEY;
+  if (!apiKey) {
+    return { ok: false, error: 'YOUTUBE_TRANSCRIPT_API_KEY is not configured in .env' };
+  }
+
+  const videoId = extractYouTubeVideoId(youtubeUrl);
+  if (!videoId) {
+    return { ok: false, error: `Could not extract a valid YouTube video ID from: ${youtubeUrl}` };
+  }
+
+  try {
+    const response = await fetch('https://www.youtube-transcript.io/api/transcripts', {
+      method: 'POST',
+      headers: {
+        Authorization: `Basic ${apiKey}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ ids: [videoId] }),
+    });
+
+    if (!response.ok) {
+      const errText = await response.text();
+      return { ok: false, error: `Transcript API error ${response.status}: ${errText || response.statusText}` };
+    }
+
+    // The API returns an array; each element has a `text` field (full transcript)
+    // and optionally a `title`.
+    const data = await response.json() as Array<{
+      id?: string;
+      text?: string;
+      title?: string;
+      tracks?: Array<{ transcript?: Array<{ text?: string }> }>;
+    }>;
+
+    const entry = Array.isArray(data) ? data[0] : null;
+    if (!entry) {
+      return { ok: false, error: 'No transcript data returned by API.' };
+    }
+
+    // Prefer the top-level `text` field (full concatenated transcript)
+    let transcript = typeof entry.text === 'string' ? entry.text.trim() : '';
+
+    // Fallback: stitch together tracks[0].transcript[*].text
+    if (!transcript && Array.isArray(entry.tracks) && entry.tracks[0]?.transcript) {
+      transcript = entry.tracks[0].transcript
+        .map((seg) => seg.text ?? '')
+        .join(' ')
+        .trim();
+    }
+
+    if (!transcript) {
+      return { ok: false, error: 'Transcript is empty or unavailable for this video.' };
+    }
+
+    const title = typeof entry.title === 'string' ? entry.title : `YouTube Video ${videoId}`;
+    return { ok: true, transcript, title, videoId };
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    return { ok: false, error: `Network error fetching transcript: ${msg}` };
+  }
+}
+
 export async function generateScriptAction(articleText: string): Promise<string | null> {
   try {
     const systemPrompt = `You are a script writer for a short-form AI and tech news channel. Scripts are published as 60-second vertical videos for Instagram Reels and YouTube Shorts.

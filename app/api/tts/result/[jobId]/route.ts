@@ -2,8 +2,7 @@ import { NextRequest } from "next/server";
 import fs from "fs";
 import path from "path";
 
-const TTS_UPSTREAM = process.env.TTS_UPSTREAM ?? "https://sanjay.tailc61860.ts.net/tts";
-const TTS_UPSTREAM_BASE = TTS_UPSTREAM.replace(/\/tts\/?$/, "");
+const TTS_BASE = "https://sanjaymalladi-pocket-tts.hf.space";
 const CACHE_DIR = path.join(process.cwd(), "public", "cache", "tts");
 
 export const maxDuration = 60;
@@ -14,7 +13,7 @@ export async function GET(
 ) {
   const { jobId } = await context.params;
 
-  const upstream = await fetch(`${TTS_UPSTREAM_BASE}/tts/result/${encodeURIComponent(jobId)}`, {
+  const upstream = await fetch(`${TTS_BASE}/result/${encodeURIComponent(jobId)}`, {
     cache: "no-store",
     signal: AbortSignal.timeout(60_000),
   });
@@ -29,16 +28,11 @@ export async function GET(
     upstream.headers.get("content-disposition") || `attachment; filename="${jobId}.wav"`;
   const bytes = Buffer.from(await upstream.arrayBuffer());
 
-  fs.mkdirSync(CACHE_DIR, { recursive: true });
-  const filename = `${jobId}.wav`;
-  fs.writeFileSync(path.join(CACHE_DIR, filename), bytes);
-
   return new Response(bytes, {
     headers: {
       "Content-Type": contentType,
       "Content-Disposition": contentDisposition,
       "Cache-Control": "no-store",
-      "X-Studio-Cache-Url": `/cache/tts/${filename}`,
     },
   });
 }

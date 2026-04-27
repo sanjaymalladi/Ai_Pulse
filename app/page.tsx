@@ -7,8 +7,8 @@ import NewsTab from "./components/NewsTab";
 import ViralTab from "./components/ViralTab";
 import ScriptTab from "./components/ScriptTab";
 import TTSTab from "./components/TTSTab";
-
 import VideoTab from "./components/VideoTab";
+import YouTubeTab from "./components/YouTubeTab";
 import {
   clearStudioTtsAudio,
   loadStudioTtsAudio,
@@ -77,9 +77,9 @@ function readStudioState(): StudioPersistedState | null {
 }
 
 export default function Home() {
-  const { identity, claims, loading: authLoading, signIn, clearIdentity } = useShooAuth();
+  const { identity, claims, loading: authLoading, signIn, clearIdentity } = useShooAuth({ autoSessionMonitor: false });
   
-  const [activeTab, setActiveTab] = useState<'news' | 'viral' | 'script' | 'tts' | 'video'>('news');
+  const [activeTab, setActiveTab] = useState<'news' | 'viral' | 'youtube' | 'script' | 'tts' | 'video'>('news');
   const [viralArticle, setViralArticle] = useState<Article | null>(null);
   const [viralFullHtml, setViralFullHtml] = useState<string | null>(null);
   const [scriptSourceText, setScriptSourceText] = useState<string | null>(null);
@@ -195,6 +195,19 @@ export default function Home() {
       setViralArticle(payload.article);
       setViralFullHtml(payload.fullHtml);
       setScriptSourceText(payload.fullText);
+    },
+    []
+  );
+
+  const handleYouTubeTranscript = useCallback(
+    (payload: { transcript: string; title: string; videoId: string }) => {
+      // Clear any previously selected article so SCRIPT_GEN uses the YT transcript
+      setViralArticle(null);
+      setViralFullHtml(null);
+      setGeneratedScript(null);
+      setScriptSourceText(payload.transcript);
+      // Auto-navigate to script generation
+      setActiveTab('script');
     },
     []
   );
@@ -328,6 +341,14 @@ export default function Home() {
           </button>
 
           <button 
+            onClick={() => setActiveTab('youtube')}
+            className={`sys-btn tab-btn ${activeTab === 'youtube' ? 'active' : ''}`}
+            style={{ fontSize: '1.25rem', borderBottomWidth: activeTab === 'youtube' ? '4px' : '1px', borderColor: activeTab === 'youtube' ? '#ff4444' : undefined, color: activeTab === 'youtube' ? '#ff6666' : undefined }}
+          >
+            &gt; YT_INPUT
+          </button>
+
+          <button 
             onClick={() => setActiveTab('script')}
             className={`sys-btn tab-btn ${activeTab === 'script' ? 'active' : ''}`}
             style={{ fontSize: '1.25rem', borderBottomWidth: activeTab === 'script' ? '4px' : '1px' }}
@@ -384,6 +405,10 @@ export default function Home() {
             initialFullText={scriptSourceText}
             onViralLoaded={handleViralLoaded}
           />
+        )}
+
+        {activeTab === 'youtube' && (
+          <YouTubeTab onTranscriptLoaded={handleYouTubeTranscript} />
         )}
 
         {!loading && !error && activeTab === 'script' && (

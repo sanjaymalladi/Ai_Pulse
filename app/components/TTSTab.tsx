@@ -22,6 +22,82 @@ function makeRequestId() {
     : `tts_${Date.now()}`;
 }
 
+function splitTextIntoChunks(text: string, maxLen = 800): string[] {
+  const regex = /([^.!?\n]+[.!?\n]+)|([^.!?\n]+$)/g;
+  const parts = text.match(regex) || [text];
+  const chunks: string[] = [];
+  let current = '';
+
+  for (const part of parts) {
+    if ((current + part).length <= maxLen) {
+      current += part;
+    } else {
+      if (current) chunks.push(current.trim());
+      current = part;
+      while (current.length > maxLen) {
+        let splitIdx = current.lastIndexOf(' ', maxLen);
+        if (splitIdx === -1) splitIdx = maxLen;
+        chunks.push(current.slice(0, splitIdx).trim());
+        current = current.slice(splitIdx);
+      }
+    }
+  }
+  if (current.trim()) chunks.push(current.trim());
+  return chunks;
+}
+
+async function concatenateWavBlobs(blobs: Blob[]): Promise<Blob> {
+  if (blobs.length === 0) throw new Error('No audio blobs to concatenate');
+  if (blobs.length === 1) return blobs[0];
+
+  const buffers = await Promise.all(blobs.map(b => b.arrayBuffer()));
+
+  function findDataChunk(buffer: ArrayBuffer) {
+    const view = new DataView(buffer);
+    let offset = 12;
+    while (offset < view.byteLength) {
+      const chunkId = String.fromCharCode(
+        view.getUint8(offset),
+        view.getUint8(offset + 1),
+        view.getUint8(offset + 2),
+        view.getUint8(offset + 3)
+      );
+      const chunkSize = view.getUint32(offset + 4, true);
+      if (chunkId === 'data') {
+        return { offset: offset + 8, size: chunkSize, headerSize: offset + 8 };
+      }
+      offset += 8 + chunkSize;
+    }
+    throw new Error('No data chunk found');
+  }
+
+  let totalDataLength = 0;
+  const chunkInfos = buffers.map(buffer => {
+    const info = findDataChunk(buffer);
+    totalDataLength += info.size;
+    return { buffer, ...info };
+  });
+
+  const firstHeaderSize = chunkInfos[0].headerSize;
+  const combinedLength = firstHeaderSize + totalDataLength;
+  const combinedBuffer = new Uint8Array(combinedLength);
+
+  combinedBuffer.set(new Uint8Array(buffers[0].slice(0, firstHeaderSize)), 0);
+
+  const view = new DataView(combinedBuffer.buffer);
+  view.setUint32(4, combinedLength - 8, true);
+  view.setUint32(firstHeaderSize - 4, totalDataLength, true);
+
+  let writeOffset = firstHeaderSize;
+  for (const info of chunkInfos) {
+    const audioData = new Uint8Array(info.buffer.slice(info.offset, info.offset + info.size));
+    combinedBuffer.set(audioData, writeOffset);
+    writeOffset += audioData.length;
+  }
+
+  return new Blob([combinedBuffer], { type: 'audio/wav' });
+}
+
 export default function TTSTab({
   script,
   initialAudioUrl = null,
@@ -119,15 +195,10 @@ export default function TTSTab({
           if (!resultRes.ok) {
             throw new Error(`TTS_RESULT_FAILED // HTTP ${resultRes.status}`);
           }
-          const cachedUrl = resultRes.headers.get('X-Studio-Cache-Url');
-          if (cachedUrl) {
-            setServerAudioUrl(cachedUrl);
-            onServerAudioGenerated?.(cachedUrl);
-          }
+          // We no longer setServerAudioUrl here because this might be just one chunk
           const blob = await resultRes.blob();
           if (blob.size === 0) throw new Error('TTS_EMPTY_RESULT');
-          await finalizeTtsBlob(blob, currentRequestId);
-          return;
+          return blob;
         }
       } catch (error) {
         consecutiveFailures += 1;
@@ -162,25 +233,56 @@ export default function TTSTab({
         setStatusDetail('Direct TTS URL is configured, but polling mode now expects the Next.js proxy.');
       }
 
-      const startRes = await fetch(TTS_START_ENDPOINT, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ text: script, requestId: currentRequestId }),
-      });
-      const startPayload = await startRes.json().catch(() => ({}));
-      if (!startRes.ok) {
-        throw new Error(startPayload.error || `TTS_START_FAILED // HTTP ${startRes.status}`);
+      const chunks = splitTextIntoChunks(script, 800);
+      const blobs: Blob[] = [];
+
+      for (let i = 0; i < chunks.length; i++) {
+        if (activeRequestRef.current !== currentRequestId) break;
+        const chunk = chunks[i];
+        setStatusDetail(`Transmitting chunk ${i + 1}/${chunks.length}...`);
+
+        const startRes = await fetch(TTS_START_ENDPOINT, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ text: chunk, requestId: currentRequestId }),
+        });
+        const startPayload = await startRes.json().catch(() => ({}));
+        if (!startRes.ok) {
+          throw new Error(startPayload.error || `TTS_START_FAILED // HTTP ${startRes.status}`);
+        }
+
+        const newJobId = String(startPayload.jobId || '');
+        if (!newJobId) throw new Error('TTS_START_MISSING_JOB_ID');
+
+        activeJobRef.current = newJobId;
+        setJobId(newJobId);
+        setLastEvent(`job_started_chunk_${i + 1}`);
+        setStatusDetail(`Job queued for chunk ${i + 1}/${chunks.length}: ${newJobId}`);
+
+        const blob = await pollJob(currentRequestId, newJobId);
+        if (blob) {
+          blobs.push(blob);
+        }
       }
 
-      const newJobId = String(startPayload.jobId || '');
-      if (!newJobId) throw new Error('TTS_START_MISSING_JOB_ID');
+      if (activeRequestRef.current === currentRequestId && blobs.length > 0) {
+        setStatusDetail('Concatenating audio chunks...');
+        const finalBlob = await concatenateWavBlobs(blobs);
 
-      activeJobRef.current = newJobId;
-      setJobId(newJobId);
-      setLastEvent('job_started');
-      setStatusDetail(`Job queued: ${newJobId}`);
+        setStatusDetail('Uploading stitched audio to server...');
+        const formData = new FormData();
+        formData.append('file', new File([finalBlob], 'stitched.wav', { type: 'audio/wav' }));
+        const upRes = await fetch('/api/tts/upload', { method: 'POST', body: formData });
+        if (upRes.ok) {
+          const upData = await upRes.json();
+          if (upData.url) {
+            setServerAudioUrl(upData.url);
+            onServerAudioGenerated?.(upData.url);
+          }
+        }
 
-      await pollJob(currentRequestId, newJobId);
+        await finalizeTtsBlob(finalBlob, currentRequestId);
+      }
     } catch (err: unknown) {
       const message = err instanceof Error ? err.message : 'UNKNOWN_FAILURE';
       if (activeRequestRef.current === currentRequestId) {

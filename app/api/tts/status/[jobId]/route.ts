@@ -1,7 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 
-const TTS_UPSTREAM = process.env.TTS_UPSTREAM ?? "https://sanjay.tailc61860.ts.net/tts";
-const TTS_UPSTREAM_BASE = TTS_UPSTREAM.replace(/\/tts\/?$/, "");
+const TTS_BASE = "https://sanjaymalladi-pocket-tts.hf.space";
 
 export const maxDuration = 30;
 
@@ -11,7 +10,7 @@ export async function GET(
 ) {
   try {
     const { jobId } = await context.params;
-    const upstream = await fetch(`${TTS_UPSTREAM_BASE}/tts/status/${encodeURIComponent(jobId)}`, {
+    const upstream = await fetch(`${TTS_BASE}/status/${encodeURIComponent(jobId)}`, {
       cache: "no-store",
       signal: AbortSignal.timeout(30_000),
     });
