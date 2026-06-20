@@ -3,6 +3,7 @@
 import { useState, useEffect, useRef } from 'react';
 import { Article, pickViralArticleAction, fetchFullArticleAction } from '../actions';
 import { preferArxivHtmlUrl } from '../lib/arxivLinks';
+import { saveViralHistory } from '../lib/viralHistory';
 
 type ViralTabProps = {
   articles: Article[];
@@ -96,6 +97,7 @@ export default function ViralTab({
           if (cancelled) return;
           if (winner) {
             picked = true;
+            saveViralHistory([{ title: winner.title }]);
             setViralArticle(winner);
             await loadFullForArticle(winner);
           } else {
@@ -164,6 +166,11 @@ export default function ViralTab({
           <span style={{ background: 'var(--brand-neon)', color: 'var(--bg-main)', padding: '4px 12px', fontWeight: 'bold' }}>
             [ VIRAL_DETECTED ]
           </span>
+          {typeof viralArticle.viralScore === 'number' && (
+            <span style={{ marginLeft: '12px', fontWeight: 'bold' }}>
+              VIRAL_SCORE: {viralArticle.viralScore.toFixed(1)}
+            </span>
+          )}
         </div>
         <h1>{viralArticle.title}</h1>
         <div className="modal-details">

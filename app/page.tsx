@@ -2,7 +2,7 @@
 
 import { useState, useEffect, useCallback } from "react";
 import { useShooAuth } from "@shoojs/react";
-import { Article, fetchFeedsAction } from "./actions";
+import { Article, fetchFeedsAction, rankArticlesAction } from "./actions";
 import NewsTab from "./components/NewsTab";
 import ViralTab from "./components/ViralTab";
 import ScriptTab from "./components/ScriptTab";
@@ -14,6 +14,7 @@ import {
   loadStudioTtsAudio,
 } from "./lib/studioAudioCache";
 import { preferArxivHtmlUrl } from "./lib/arxivLinks";
+import { getViralHistory, saveViralHistory } from "./lib/viralHistory";
 
 const STUDIO_STATE_KEY = 'studio_state';
 
@@ -90,7 +91,7 @@ export default function Home() {
   const [studioHydrated, setStudioHydrated] = useState(false);
   const [articles, setArticles] = useState<Article[]>([]);
   const [loading, setLoading] = useState(true);
-  const [error, setError] = useState(false);
+  const [error, setError] = useState<string | false>(false);
   const [time, setTime] = useState('--:--:--');
   
   const isDev = process.env.NODE_ENV === 'development';
@@ -177,10 +178,15 @@ export default function Home() {
     setError(false);
     try {
       const data = await fetchFeedsAction();
-      setArticles(data);
+      const history = getViralHistory();
+      const ranked = await rankArticlesAction(data, history);
+      saveViralHistory(ranked.map((a) => ({ title: a.title })));
+      setArticles(ranked);
     } catch (e) {
       console.error(e);
-      setError(true);
+      const msg = e instanceof Error ? e.message : "Failed to load RSS feed.";
+      setError(msg);
+      setArticles([]);
     } finally {
       setLoading(false);
     }
@@ -375,16 +381,17 @@ export default function Home() {
 
         {error && (
           <div className="state-container error">
-            <h3 style={{ color: 'var(--brand-alert)', fontSize: '1.5rem', marginBottom: '12px' }}>[ ERR_CONNECTION_REFUSED ]</h3>
-            <p style={{ marginBottom: '24px' }}>Failed to establish link with rendering node.</p>
+            <h3 style={{ color: 'var(--brand-alert)', fontSize: '1.5rem', marginBottom: '12px' }}>[ ERR_FEED_LINK ]</h3>
+            <p style={{ marginBottom: '24px' }}>{error}</p>
             <button onClick={fetchLatestNews} className="sys-btn error-btn">[ RETRY_CONNECTION ]</button>
           </div>
         )}
 
-        {loading && articles.length === 0 && (
+        {loading && articles.length === 0 && !error && (
           <div className="state-container">
             <div className="loading-bar"></div>
             <p>Establishing connection to global matrix...</p>
+            <p style={{ marginTop: '12px', opacity: 0.7 }}>RSS aggregator cold start can take up to 90 seconds.</p>
           </div>
         )}
 

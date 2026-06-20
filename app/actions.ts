@@ -12,6 +12,12 @@ import {
   topArticlesByHeuristic,
   type ArticleLike,
 } from './lib/viralCluster';
+import {
+  rankArticlesByViralScore,
+  type ViralHistoryEntry,
+  type ViralScoreBreakdown,
+} from './lib/viralRanker';
+import { fetchRssText } from './lib/rssFetch';
 
 export interface Article {
   id: string;
@@ -20,7 +26,14 @@ export interface Article {
   description: string;
   pubDate: string;
   source: string;
+  viralScore?: number;
+  viralBreakdown?: ViralScoreBreakdown;
 }
+
+export type RankedArticle = Article & {
+  viralScore: number;
+  viralBreakdown: ViralScoreBreakdown;
+};
 
 /** Dev-only: what the viral pipeline does before any LLM call (see /viral-viz). */
 export type ViralPipelinePreviewResult =
@@ -83,7 +96,7 @@ export type ViralPipelinePreviewResult =
     }
   | { ok: false; error: string; code: 'production' | 'embed_failed' };
 
-const RSS_URL = "https://rss-feed-aggrigator.onrender.com/rss";
+const RSS_URL = process.env.RSS_FEED_URL?.trim() || "https://rss-feed-aggrigator.onrender.com/rss";
 const OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions";
 const NVIDIA_URL = "https://integrate.api.nvidia.com/v1/chat/completions";
 
@@ -372,15 +385,18 @@ or
 }
 
 export async function fetchFeedsAction(): Promise<Article[]> {
+  const totalTimeoutMs = Math.max(15_000, Math.floor(envNum("RSS_FETCH_TOTAL_TIMEOUT_MS", 90_000)));
+
+  let xmlText: string;
   try {
-    const res = await fetch(RSS_URL, { cache: "no-store" });
-    if (!res.ok) throw new Error("Fetch failed");
-    
-    const xmlText = await res.text();
-    // Since DOMParser is not available in Node, we will use a raw regex/string split approach
-    // or we'd need a package like rss-parser. 
-    // For a lightweight approach without installing packages, regex works for this exact feed structure.
-    
+    xmlText = await fetchRssText(RSS_URL, { totalTimeoutMs });
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    console.error("RSS fetch error", e);
+    throw new Error(`RSS feed unavailable (${msg}). The aggregator may be cold-starting — retry in a moment.`);
+  }
+
+  try {
     const items = xmlText.split("<item>").slice(1);
     let missingPubDateCount = 0;
     const articles: Article[] = items.map((item, index) => {
@@ -423,42 +439,112 @@ export async function fetchFeedsAction(): Promise<Article[]> {
       );
     }
 
-    // Sort descending
     articles.sort((a, b) => new Date(b.pubDate).getTime() - new Date(a.pubDate).getTime());
-    
+
     return articles;
   } catch (e) {
-    console.error("RSS fetch error", e);
-    return [];
+    console.error("RSS parse error", e);
+    throw new Error("RSS feed returned invalid data.");
   }
 }
 
-export async function pickViralArticleAction(articles: Article[]): Promise<Article | null> {
+export async function rankArticlesAction(
+  articles: Article[],
+  history: ViralHistoryEntry[] = []
+): Promise<RankedArticle[]> {
+  if (!articles || articles.length === 0) return [];
+  const nowMs = Date.now();
+  return rankArticlesByViralScore(articles, { nowMs, history }).map(({ article, score, breakdown }) => ({
+    ...article,
+    viralScore: score,
+    viralBreakdown: breakdown,
+  }));
+}
+
+function attachViralScore(article: Article, score: number, breakdown: ViralScoreBreakdown): Article {
+  return { ...article, viralScore: score, viralBreakdown: breakdown };
+}
+
+function rankedFromPreScoredArticles(articles: Article[]) {
+  return [...articles]
+    .filter((a) => typeof a.viralScore === "number" && a.viralBreakdown)
+    .sort(
+      (a, b) =>
+        (b.viralScore ?? 0) - (a.viralScore ?? 0) ||
+        new Date(b.pubDate).getTime() - new Date(a.pubDate).getTime()
+    )
+    .map((article) => ({
+      article,
+      score: article.viralScore as number,
+      breakdown: article.viralBreakdown as ViralScoreBreakdown,
+    }));
+}
+
+export async function pickViralArticleAction(
+  articles: Article[],
+  history: ViralHistoryEntry[] = []
+): Promise<Article | null> {
   if (!articles || articles.length === 0) return null;
 
   const nowMs = Date.now();
-  /** Newest-first RSS order: take head, shuffle before LLM to reduce position bias. */
   const poolSize = Math.max(1, Math.floor(envNum("VIRAL_LLM_POOL_SIZE", 30)));
   const fallbackTopN = Math.max(1, Math.floor(envNum("VIRAL_FALLBACK_TOP_N", 100)));
+  const llmCandidateCount = Math.max(1, Math.floor(envNum("VIRAL_RANKER_LLM_CANDIDATES", 8)));
+  const useLlm = envBool("VIRAL_USE_LLM", true);
 
   const pool = articles.slice(0, Math.min(poolSize, articles.length));
-  const shuffled = shuffleArray(pool);
-  const heuristicPool = topArticlesByHeuristic(pool as ArticleLike[], nowMs, 72, 1)
-    .map((idx) => pool[idx])
-    .filter(Boolean);
+  const preScored = rankedFromPreScoredArticles(pool);
+  const ranked =
+    preScored.length === pool.length
+      ? preScored
+      : rankArticlesByViralScore(pool, { nowMs, history });
+  const topRanked = ranked[0];
+  if (!topRanked) return null;
+
+  const llmCandidates = ranked.slice(0, Math.min(llmCandidateCount, ranked.length)).map((r) => r.article);
+
+  if (!useLlm) {
+    return attachViralScore(topRanked.article, topRanked.score, topRanked.breakdown);
+  }
 
   try {
-    const winner = await llmPickFromCandidates(shuffled, nowMs);
-    return winner || heuristicPool[0] || shuffled[0] || null;
+    const winner = await llmPickFromCandidates(llmCandidates, nowMs);
+    if (winner) {
+      const match = ranked.find((r) => r.article.link === winner.link || r.article.id === winner.id);
+      if (match) {
+        return attachViralScore(match.article, match.score, match.breakdown);
+      }
+      return winner;
+    }
+    return attachViralScore(topRanked.article, topRanked.score, topRanked.breakdown);
   } catch (err) {
-    console.error("Viral LLM error; falling back to larger shuffled slice:", err);
-    const fb = articles.slice(0, Math.min(fallbackTopN, articles.length));
-    const llmFallback = await llmPickFromArticleLines(shuffleArray(fb));
-    if (llmFallback) return llmFallback;
-    const heuristicFallback = topArticlesByHeuristic(fb as ArticleLike[], nowMs, 72, 1)
-      .map((idx) => fb[idx])
-      .filter(Boolean)[0];
-    return heuristicFallback || fb[0] || null;
+    console.error("Viral LLM error; falling back to ranker score:", err);
+    const fbPool = articles.slice(0, Math.min(fallbackTopN, articles.length));
+    const fbPreScored = rankedFromPreScoredArticles(fbPool);
+    const fbRanked =
+      fbPreScored.length === fbPool.length
+        ? fbPreScored
+        : rankArticlesByViralScore(fbPool, { nowMs, history });
+    const fbTop = fbRanked[0];
+    if (!fbTop) return null;
+
+    try {
+      const llmFallback = await llmPickFromCandidates(
+        fbRanked.slice(0, Math.min(llmCandidateCount, fbRanked.length)).map((r) => r.article),
+        nowMs
+      );
+      if (llmFallback) {
+        const match = fbRanked.find((r) => r.article.link === llmFallback.link || r.article.id === llmFallback.id);
+        if (match) {
+          return attachViralScore(match.article, match.score, match.breakdown);
+        }
+        return llmFallback;
+      }
+    } catch {
+      // ranker-only fallback below
+    }
+
+    return attachViralScore(fbTop.article, fbTop.score, fbTop.breakdown);
   }
 }
 

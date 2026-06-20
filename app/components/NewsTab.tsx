@@ -39,6 +39,11 @@ export default function NewsTab({ articles, onArticleClick }: { articles: Articl
             <div className="article-meta">
               <span className="src-tag">[ {article.source} ]</span>
               <span>T-{timeAgo.toUpperCase()}</span>
+              {typeof article.viralScore === 'number' && (
+                <span style={{ marginLeft: 'auto', fontWeight: 'bold', color: 'var(--brand-neon)' }}>
+                  SCORE:{article.viralScore.toFixed(1)}
+                </span>
+              )}
             </div>
             <h3>{article.title}</h3>
             <div className="article-preview">{plainTextDesc}</div>
